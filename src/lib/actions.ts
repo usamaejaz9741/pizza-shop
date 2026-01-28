@@ -4,96 +4,56 @@ import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import crypto from "crypto";
 
-// Initialize Admin Client (Bypasses RLS)
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-);
-
-// --- ADMIN SESSION (SIGNED COOKIE) ---
-const COOKIE_NAME = "admin_session";
-const SESSION_VERSION = "v1";
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 1 week
-
-function getAdminSecret(): string {
-  // We reuse ADMIN_PASSWORD as the signing secret to avoid introducing new env vars.
-  // Changing ADMIN_PASSWORD will invalidate all sessions (fine).
-  const secret = process.env.ADMIN_PASSWORD;
-  if (!secret) throw new Error("Missing ADMIN_PASSWORD env var");
-  return secret;
+function mustEnv(name: string): string {
+  const v = process.env[name];
+  if (!v)
+    throw new Error(`[env] Missing ${name}. Add it to .env.local (root).`);
+  return v;
 }
 
-function sign(payload: string): string {
-  return crypto
-    .createHmac("sha256", getAdminSecret())
-    .update(payload)
-    .digest("base64url");
+// IMPORTANT:
+// - NEXT_PUBLIC_SUPABASE_ANON_KEY can be a publishable key (sb_publishable_...)
+// - SUPABASE_SERVICE_ROLE_KEY MUST be a secret/service-role key (sb_secret_... or legacy JWT)
+const SUPABASE_URL = mustEnv("NEXT_PUBLIC_SUPABASE_URL");
+const SERVICE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+const looksLikeServiceRole =
+  SERVICE_KEY.startsWith("sb_secret_") || SERVICE_KEY.startsWith("eyJ");
+
+if (!looksLikeServiceRole) {
+  throw new Error(
+    `[env] SUPABASE_SERVICE_ROLE_KEY does not look like a service-role key. ` +
+      `Expected sb_secret_... (or legacy JWT eyJ...). ` +
+      `If you put a publishable/anon key here, all admin mutations will silently fail under RLS.`,
+  );
 }
 
-function makeSessionValue(): string {
-  const ts = Math.floor(Date.now() / 1000);
-  const payload = `${SESSION_VERSION}:${ts}`;
-  const sig = sign(payload);
-  return `${SESSION_VERSION}.${ts}.${sig}`;
-}
-
-function verifySessionValue(value?: string | null): boolean {
-  if (!value) return false;
-
-  const [ver, tsStr, sig] = value.split(".");
-  if (ver !== SESSION_VERSION || !tsStr || !sig) return false;
-
-  const ts = Number(tsStr);
-  if (!Number.isFinite(ts)) return false;
-
-  const now = Math.floor(Date.now() / 1000);
-  if (now - ts > SESSION_TTL_SECONDS) return false;
-
-  const payload = `${SESSION_VERSION}:${ts}`;
-  const expected = sign(payload);
-
-  // timing-safe compare
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-async function requireAdmin() {
-  const cookieStore = await cookies();
-  const v = cookieStore.get(COOKIE_NAME)?.value;
-
-  if (!verifySessionValue(v)) {
-    // Clear any bad cookie and force login
-    cookieStore.delete(COOKIE_NAME);
-    redirect("/admin/login");
-  }
-}
+// Initialize Admin Client (bypasses RLS)
+const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
 // --- AUTH ---
 export async function loginAction(formData: FormData) {
   const password = formData.get("password");
 
-  if (typeof password === "string" && password === process.env.ADMIN_PASSWORD) {
+  if (password === process.env.ADMIN_PASSWORD) {
     const cookieStore = await cookies();
-    cookieStore.set(COOKIE_NAME, makeSessionValue(), {
+    cookieStore.set("admin_session", "true", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: SESSION_TTL_SECONDS,
+      maxAge: 60 * 60 * 24 * 7, // 1 week
       path: "/",
     });
     return { success: true };
   }
-
   return { success: false, error: "Invalid password" };
 }
 
 export async function logoutAction() {
   const cookieStore = await cookies();
-  cookieStore.delete(COOKIE_NAME);
+  cookieStore.delete("admin_session");
   redirect("/admin/login");
 }
 
@@ -103,26 +63,34 @@ export async function getStoreData() {
 }
 
 export async function getAdminData() {
-  await requireAdmin();
   return fetchStoreData(true);
 }
 
 async function fetchStoreData(isAdmin: boolean) {
-  const { data: settings } = await supabaseAdmin.from("settings").select("*");
-  const { data: categories } = await supabaseAdmin
+  const settingsRes = await supabaseAdmin.from("settings").select("*");
+  if (settingsRes.error)
+    throw new Error(`settings.select: ${settingsRes.error.message}`);
+
+  const categoriesRes = await supabaseAdmin
     .from("categories")
     .select("*")
     .order("sort_order");
+  if (categoriesRes.error)
+    throw new Error(`categories.select: ${categoriesRes.error.message}`);
 
-  const { data: allAddonGroups } = await supabaseAdmin
+  // Order by 'name' for stability
+  const addonGroupsRes = await supabaseAdmin
     .from("addon_groups")
     .select("*, addons(*)")
     .order("name");
+  if (addonGroupsRes.error)
+    throw new Error(`addon_groups.select: ${addonGroupsRes.error.message}`);
 
   let productQuery = supabaseAdmin.from("products").select(`
       *,
       variants (*),
       product_addon_groups (
+        group_id,
         addon_groups (
           *,
           addons (*)
@@ -134,10 +102,17 @@ async function fetchStoreData(isAdmin: boolean) {
     productQuery = productQuery.eq("is_active", true);
   }
 
-  const { data: products } = await productQuery;
+  const productsRes = await productQuery;
+  if (productsRes.error)
+    throw new Error(`products.select: ${productsRes.error.message}`);
+
+  const settings = settingsRes.data ?? [];
+  const categories = categoriesRes.data ?? [];
+  const products = productsRes.data ?? [];
+  const addonGroups = addonGroupsRes.data ?? [];
 
   const rawSettings =
-    settings?.reduce(
+    settings.reduce(
       (acc: any, curr: any) => ({ ...acc, [curr.key]: curr.value }),
       {},
     ) || {};
@@ -154,51 +129,59 @@ async function fetchStoreData(isAdmin: boolean) {
 
   return {
     settings: settingsObj,
-    categories: categories || [],
-    products: products || [],
-    addonGroups: allAddonGroups || [],
+    categories,
+    products,
+    addonGroups,
   };
 }
 
 // --- ADMIN MUTATIONS ---
-export async function updateSettings(formData: FormData) {
-  await requireAdmin();
 
+// 1. Settings
+export async function updateSettings(formData: FormData) {
   const settings = {
     name: formData.get("name"),
     phone: formData.get("phone"),
     currency: formData.get("currency"),
     delivery_fee_cents: parseInt(
       (formData.get("delivery_fee_cents") as string) || "0",
+      10,
     ),
     theme_color: "red",
   };
 
-  await supabaseAdmin.from("settings").upsert({
+  const res = await supabaseAdmin.from("settings").upsert({
     key: "restaurant_info",
     value: settings,
   });
+
+  if (res.error) throw new Error(`updateSettings: ${res.error.message}`);
 
   revalidatePath("/");
   revalidatePath("/admin");
 }
 
-// Categories
+// 2. Categories
 export async function createCategory(name: string) {
-  await requireAdmin();
-
-  const { data: max } = await supabaseAdmin
+  const maxRes = await supabaseAdmin
     .from("categories")
     .select("sort_order")
     .order("sort_order", { ascending: false })
     .limit(1)
     .single();
 
-  const nextOrder = (max?.sort_order || 0) + 1;
+  if (maxRes.error && maxRes.error.code !== "PGRST116") {
+    // PGRST116 = "Results contain 0 rows" (no categories yet)
+    throw new Error(`createCategory: ${maxRes.error.message}`);
+  }
 
-  await supabaseAdmin
+  const nextOrder = ((maxRes.data as any)?.sort_order || 0) + 1;
+  const res = await supabaseAdmin
     .from("categories")
     .insert({ name, sort_order: nextOrder });
+
+  if (res.error) throw new Error(`createCategory: ${res.error.message}`);
+
   revalidatePath("/");
   revalidatePath("/admin");
 }
@@ -206,9 +189,7 @@ export async function createCategory(name: string) {
 export async function updateCategoryOrderBulk(
   items: { id: string; sort_order: number }[],
 ) {
-  await requireAdmin();
-
-  await Promise.all(
+  const results = await Promise.all(
     items.map((item) =>
       supabaseAdmin
         .from("categories")
@@ -216,45 +197,45 @@ export async function updateCategoryOrderBulk(
         .eq("id", item.id),
     ),
   );
+  const firstErr = results.find((r) => r.error)?.error;
+  if (firstErr) throw new Error(`updateCategoryOrderBulk: ${firstErr.message}`);
 
   revalidatePath("/");
   revalidatePath("/admin");
 }
 
 export async function deleteCategory(id: string) {
-  await requireAdmin();
+  const res = await supabaseAdmin.from("categories").delete().eq("id", id);
+  if (res.error) throw new Error(`deleteCategory: ${res.error.message}`);
 
-  await supabaseAdmin.from("categories").delete().eq("id", id);
   revalidatePath("/");
   revalidatePath("/admin");
 }
 
-// Products
+// 3. Products
 export async function updateProductStatus(id: string, isActive: boolean) {
-  await requireAdmin();
-
-  await supabaseAdmin
+  const res = await supabaseAdmin
     .from("products")
     .update({ is_active: isActive })
     .eq("id", id);
+  if (res.error) throw new Error(`updateProductStatus: ${res.error.message}`);
+
   revalidatePath("/");
   revalidatePath("/admin");
 }
 
 export async function createProduct(formData: FormData) {
-  await requireAdmin();
-
   const name = formData.get("name") as string;
   const description = formData.get("description") as string;
   const categoryId = formData.get("category_id") as string;
-  const price = parseInt((formData.get("price") as string) || "0");
+  const price = parseInt((formData.get("price") as string) || "0", 10);
 
   const encodedName = encodeURIComponent(name);
   const imageUrl =
     (formData.get("image_url") as string) ||
     `https://placehold.co/400x300/orange/white?text=${encodedName}`;
 
-  const { data: product, error } = await supabaseAdmin
+  const createRes = await supabaseAdmin
     .from("products")
     .insert({
       name,
@@ -266,18 +247,25 @@ export async function createProduct(formData: FormData) {
     .select()
     .single();
 
-  if (error || !product) {
-    console.error("Error creating product:", error);
-    return { error: "Failed to create product" };
+  if (createRes.error || !createRes.data) {
+    console.error("Error creating product:", createRes.error);
+    return { error: createRes.error?.message || "Failed to create product" };
   }
 
-  await supabaseAdmin.from("variants").insert({
+  const product = createRes.data as any;
+
+  const variantRes = await supabaseAdmin.from("variants").insert({
     product_id: product.id,
     size: "Standard",
     crust: "Original",
-    price: price,
+    price,
     is_active: true,
   });
+
+  if (variantRes.error)
+    throw new Error(
+      `createProduct (default variant): ${variantRes.error.message}`,
+    );
 
   revalidatePath("/admin");
   revalidatePath("/");
@@ -285,23 +273,21 @@ export async function createProduct(formData: FormData) {
 }
 
 export async function deleteProduct(id: string) {
-  await requireAdmin();
+  const res = await supabaseAdmin.from("products").delete().eq("id", id);
+  if (res.error) throw new Error(`deleteProduct: ${res.error.message}`);
 
-  await supabaseAdmin.from("products").delete().eq("id", id);
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
-// Variants
+// 4. Variants
 export async function createVariant(formData: FormData) {
-  await requireAdmin();
-
   const product_id = formData.get("product_id") as string;
   const size = formData.get("size") as string;
   const crust = (formData.get("crust") as string) || "";
-  const price = parseInt(formData.get("price") as string);
+  const price = parseInt(formData.get("price") as string, 10);
 
-  await supabaseAdmin.from("variants").insert({
+  const res = await supabaseAdmin.from("variants").insert({
     product_id,
     size,
     crust,
@@ -309,80 +295,91 @@ export async function createVariant(formData: FormData) {
     is_active: true,
   });
 
+  if (res.error) throw new Error(`createVariant: ${res.error.message}`);
+
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
 export async function updateVariant(formData: FormData) {
-  await requireAdmin();
-
   const id = formData.get("id") as string;
   const size = formData.get("size") as string;
   const crust = (formData.get("crust") as string) || "";
-  const price = parseInt(formData.get("price") as string);
+  const price = parseInt(formData.get("price") as string, 10);
 
-  await supabaseAdmin
+  const res = await supabaseAdmin
     .from("variants")
     .update({ size, crust, price })
     .eq("id", id);
+  if (res.error) throw new Error(`updateVariant: ${res.error.message}`);
+
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
 export async function deleteVariant(id: string) {
-  await requireAdmin();
+  const res = await supabaseAdmin.from("variants").delete().eq("id", id);
+  if (res.error) throw new Error(`deleteVariant: ${res.error.message}`);
 
-  await supabaseAdmin.from("variants").delete().eq("id", id);
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
-// Add-on Groups & Add-ons
+// 5. Add-on Groups & Add-ons
 export async function createAddonGroup(formData: FormData) {
-  await requireAdmin();
-
   const name = formData.get("name") as string;
   const type = formData.get("type") as string;
-  const min_select = parseInt((formData.get("min_select") as string) || "0");
-  const max_select = parseInt((formData.get("max_select") as string) || "1");
+  const min_select = parseInt(
+    (formData.get("min_select") as string) || "0",
+    10,
+  );
+  const max_select = parseInt(
+    (formData.get("max_select") as string) || "1",
+    10,
+  );
   const is_required = formData.get("is_required") === "on";
 
-  await supabaseAdmin.from("addon_groups").insert({
+  const res = await supabaseAdmin.from("addon_groups").insert({
     name,
     type,
     min_select,
     max_select,
     is_required,
+    is_active: true,
   });
+
+  if (res.error) throw new Error(`createAddonGroup: ${res.error.message}`);
 
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
 export async function deleteAddonGroup(id: string) {
-  await requireAdmin();
+  const res = await supabaseAdmin.from("addon_groups").delete().eq("id", id);
+  if (res.error) throw new Error(`deleteAddonGroup: ${res.error.message}`);
 
-  await supabaseAdmin.from("addon_groups").delete().eq("id", id);
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
 export async function createAddon(formData: FormData) {
-  await requireAdmin();
-
   const group_id = formData.get("group_id") as string;
   const name = formData.get("name") as string;
-  const price = parseInt((formData.get("price") as string) || "0");
+  const price = parseInt((formData.get("price") as string) || "0", 10);
 
-  await supabaseAdmin.from("addons").insert({ group_id, name, price });
+  const res = await supabaseAdmin
+    .from("addons")
+    .insert({ group_id, name, price, is_active: true });
+  if (res.error) throw new Error(`createAddon: ${res.error.message}`);
+
   revalidatePath("/admin");
   revalidatePath("/");
 }
 
 export async function deleteAddon(id: string) {
-  await requireAdmin();
+  const res = await supabaseAdmin.from("addons").delete().eq("id", id);
+  if (res.error) throw new Error(`deleteAddon: ${res.error.message}`);
 
-  await supabaseAdmin.from("addons").delete().eq("id", id);
   revalidatePath("/admin");
   revalidatePath("/");
 }
@@ -392,17 +389,20 @@ export async function toggleProductAddonGroup(
   group_id: string,
   is_linked: boolean,
 ) {
-  await requireAdmin();
-
   if (is_linked) {
-    await supabaseAdmin
+    // Use upsert so double-clicks / races don't fail with duplicate key errors.
+    const res = await supabaseAdmin
       .from("product_addon_groups")
-      .insert({ product_id, group_id });
+      .upsert({ product_id, group_id }, { onConflict: "product_id,group_id" });
+    if (res.error)
+      throw new Error(`toggleProductAddonGroup (link): ${res.error.message}`);
   } else {
-    await supabaseAdmin
+    const res = await supabaseAdmin
       .from("product_addon_groups")
       .delete()
       .match({ product_id, group_id });
+    if (res.error)
+      throw new Error(`toggleProductAddonGroup (unlink): ${res.error.message}`);
   }
 
   revalidatePath("/admin");
