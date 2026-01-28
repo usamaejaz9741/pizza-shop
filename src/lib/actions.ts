@@ -39,13 +39,13 @@ export async function loginAction(formData: FormData) {
   const password = formData.get("password");
 
   if (password === process.env.ADMIN_PASSWORD) {
-    const cookieStore = await cookies();
-    cookieStore.set("admin_session", "true", {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 60 * 60 * 24 * 7, // 1 week
-      path: "/",
-    });
+    // const cookieStore = await cookies();
+    // cookieStore.set("admin_session", "true", {
+    //   httpOnly: true,
+    //   secure: process.env.NODE_ENV === "production",
+    //   maxAge: 60 * 60 * 24 * 7 * 0.1, // 1 week
+    //   path: "/",
+    // });
     return { success: true };
   }
   return { success: false, error: "Invalid password" };
