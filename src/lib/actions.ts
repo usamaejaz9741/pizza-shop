@@ -34,26 +34,79 @@ const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+// --- ADMIN SESSION COOKIE (must match middleware.ts) ---
+const ADMIN_COOKIE_NAME = "admin_session";
+const SESSION_VERSION = "v1";
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+
+function base64UrlFromBytes(bytes: Uint8Array): string {
+  // Convert bytes -> base64
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
+
+  // base64 -> base64url (no padding)
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function signAdminSession(secret: string, ts: number): Promise<string> {
+  const encoder = new TextEncoder();
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const payload = `${SESSION_VERSION}:${ts}`;
+
+  const sigBuffer = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(payload),
+  );
+
+  const sigBytes = new Uint8Array(sigBuffer);
+  const sigB64Url = base64UrlFromBytes(sigBytes);
+
+  return `${SESSION_VERSION}.${ts}.${sigB64Url}`;
+}
+
 // --- AUTH ---
 export async function loginAction(formData: FormData) {
   const password = formData.get("password");
 
   if (password === process.env.ADMIN_PASSWORD) {
-    // const cookieStore = await cookies();
-    // cookieStore.set("admin_session", "true", {
-    //   httpOnly: true,
-    //   secure: process.env.NODE_ENV === "production",
-    //   maxAge: 60 * 60 * 24 * 7 * 0.1, // 1 week
-    //   path: "/",
-    // });
+    const cookieStore = await cookies();
+
+    const ts = Math.floor(Date.now() / 1000);
+    const secret = process.env.ADMIN_PASSWORD;
+
+    if (!secret) {
+      return { success: false, error: "Server misconfigured (missing ADMIN_PASSWORD)" };
+    }
+
+    const value = await signAdminSession(secret, ts);
+
+    cookieStore.set(ADMIN_COOKIE_NAME, value, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: SESSION_TTL_SECONDS,
+      path: "/",
+    });
+
     return { success: true };
   }
+
   return { success: false, error: "Invalid password" };
 }
 
 export async function logoutAction() {
   const cookieStore = await cookies();
-  cookieStore.delete("admin_session");
+  cookieStore.delete(ADMIN_COOKIE_NAME);
   redirect("/admin/login");
 }
 
