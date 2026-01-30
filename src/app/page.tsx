@@ -5,6 +5,7 @@ import Image from "next/image";
 import { useCartStore } from "@/lib/store";
 import { getStoreData } from "@/lib/actions";
 // import { formatCurrency, generateWhatsAppLink } from "@/lib/utils";
+import { formatCurrency } from "@/lib/utils";
 import {
   Product,
   Variant,
