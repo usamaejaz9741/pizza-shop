@@ -14,7 +14,8 @@ const Header = ({ settings }: { settings: StoreSettings }) => (
   <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b shadow-sm transition-all duration-200">
     <div className="max-w-md mx-auto px-4 h-14 sm:h-16 flex items-center justify-between">
       <h1 className="text-lg sm:text-xl font-extrabold text-red-600 tracking-tight flex items-center gap-2">
-        <span className="text-2xl">🍕</span> {settings?.name || 'Pizza Shop'}
+        {/* <span className="text-2xl">🍕</span> */}
+        {settings?.name || 'Pizza Shop'}
       </h1>
       <CartTrigger />
     </div>

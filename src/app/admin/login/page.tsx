@@ -21,7 +21,7 @@ export default function Login() {
             <div className="sm:mx-auto sm:w-full sm:max-w-md">
                 <div className="bg-white py-8 px-6 shadow-xl rounded-3xl border border-gray-100 sm:px-10">
                     <div className="text-center mb-8">
-                        <div className="text-4xl mb-2">🍕</div>
+                        {/* <div className="text-4xl mb-2">🍕</div> */}
                         <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Admin Access</h1>
                         <p className="text-sm text-gray-500 mt-2">Authorized personnel only</p>
                     </div>

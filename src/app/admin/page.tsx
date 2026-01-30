@@ -235,7 +235,8 @@ export default function AdminPage() {
         <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-950 shrink-0">
           <div>
             <h1 className="font-bold text-xl tracking-tight flex items-center gap-2">
-              <span className="text-2xl">🍕</span> Admin
+              {/* <span className="text-2xl">🍕</span> */}
+              Admin
             </h1>
             <p className="text-xs text-slate-400 mt-1 truncate max-w-[150px]">
               {data?.settings?.name}
