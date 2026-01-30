@@ -544,7 +544,22 @@ function CartDrawer({
   // };
 
   const handleCheckout = async () => {
-    const payload = { items, subtotal, deliveryFee, settings, customer };
+    if (!customer.name || !customer.phone) {
+      alert("Name and Phone are required!");
+      return;
+    }
+    if (deliveryType === "delivery" && !customer.address) {
+      alert("Delivery address required!");
+      return;
+    }
+
+    const payload = {
+      items,
+      subtotal: cartSubtotal, // ✅ use cartSubtotal here
+      deliveryFee,
+      settings,
+      customer: { ...customer, type: deliveryType },
+    };
 
     const res = await fetch("/api/whatsapp-order", {
       method: "POST",
@@ -555,7 +570,7 @@ function CartDrawer({
     const data = await res.json().catch(() => ({}));
 
     if (!res.ok || !data?.ok) {
-      console.error("Failed:", data);
+      console.error("Send failed:", data);
       alert("Failed to send order.");
       return;
     }
